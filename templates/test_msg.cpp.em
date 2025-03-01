@@ -31,10 +31,10 @@ float random_float_val()
     return -512.0 + static_cast <float> (rand()) /( static_cast <float> (RAND_MAX/(1024.0)));
 }
 
-// Generate a random unsigned integer value from range
+// Generate a random unsigned integer value from range, inclusive
 uint32_t random_range_unsigned_val(uint32_t min, uint32_t max)
 {
-    return min + static_cast <uint32_t> (rand()) /( static_cast <uint32_t> (RAND_MAX/(max - min)));
+    return min + static_cast <uint32_t> (rand()) % (static_cast <uint32_t> (max - min + 1));
 }
 
 
@@ -89,7 +89,7 @@ int main() {
     // Create a UAVCAN message
     @(msg_underscored_name) _msg = sample_@(msg_underscored_name)_msg();
 
-    uint8_t buffer[@(msg_define_name.upper())_MAX_SIZE] {};
+    uint8_t buffer[@(msg_define_name.upper())_MAX_SIZE];
 
     // encode the message
     uint32_t data_len = @(msg_underscored_name)_encode(&_msg, buffer);
@@ -117,7 +117,10 @@ int main() {
         .priority = 0,
         .source_node_id = 125,
     };
-    @(msg_underscored_name)_decode(&rx_transfer, &decoded_msg);
+    if (@(msg_underscored_name)_decode(&rx_transfer, &decoded_msg)) {
+        std::cout << "decode failed" << std::endl;
+        return 1;
+    }
 
     // compare decoded message with original message
     data_len = @(msg_underscored_name)_encode(&decoded_msg, buffer);
@@ -129,7 +132,8 @@ int main() {
     if (hex_str.compare(reencoded_hex_str) == 0) {
         std::cout << "Messages are equal" << std::endl;
     } else {
-        std::cout << "Messages are not equal" << std::endl;
+       std::cout << "Messages are not equal" << std::endl;
+       return 1;
     }
 
     return 0;

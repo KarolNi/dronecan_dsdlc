@@ -11,10 +11,19 @@ import os
 import argparse
 import em
 import shutil
+import time
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "../pydronecan/"))
-import dronecan.dsdl
+try:
+    import dronecan.dsdl
+except Exception as ex:
+    # for usage in CI try with a local pydronecan path
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "../pydronecan/"))
+    try:
+        import dronecan.dsdl
+    except Exception as ex:
+        print(ex)
+        print("Failed to import dronecan.dsdl, please install dronecan with 'python3 -m pip install dronecan'")
+        sys.exit(1)
 
 from dronecan_dsdlc_helpers import *
 from dronecan_dsdlc_tester import *
@@ -55,6 +64,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--output', '-O', action='store')
 parser.add_argument('--build', action='append')
 parser.add_argument('--run-tests', action='store_true')
+parser.add_argument('-j', '--jobs', type=int)
 parser.add_argument('namespace_dir', nargs='+')
 args = parser.parse_args()
 
@@ -66,8 +76,7 @@ if args.build:
 namespace_paths = [os.path.abspath(path) for path in args.namespace_dir]
 build_dir = os.path.abspath(args.output)
 
-os.chdir(os.path.dirname(__file__))
-templates_dir = 'templates'
+templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
 
 messages = dronecan.dsdl.parse_namespaces(namespace_paths)
 message_dict = {}
@@ -136,6 +145,21 @@ def expand_message(msg_name):
             f.write(output.encode("utf-8"))
     return msg_name
 
+def process_test(msg_name, jobs):
+    print(bcolors.HEADER + 'Starting Test for %s' % (msg_name,) + bcolors.ENDC)
+    try:
+        if message_dict[msg_name].kind == message_dict[msg_name].KIND_SERVICE:
+            if len(message_dict[msg_name].request_fields):
+                compile_test_app(msg_name+'_request', build_dir)
+                run_test(message_dict[msg_name], 'request', build_dir)
+            compile_test_app(msg_name+'_response', build_dir, jobs)
+            run_test(message_dict[msg_name], 'response', build_dir)
+        else:
+            compile_test_app(msg_name, build_dir, jobs)
+            run_test(message_dict[msg_name], None, build_dir)
+    except Exception as e:
+        raise Exception("Test for %s failed!" % (msg_name,)) from e
+
 # callback for maintaining list of built messages
 def append_builtlist(msg_name):
     global builtlist
@@ -160,8 +184,9 @@ if __name__ == '__main__':
             buildlist = new_buildlist
 
     from multiprocessing import Pool
+    jobs = args.jobs if args.jobs is not None else os.cpu_count()
 
-    pool = Pool()
+    pool = Pool(processes=jobs)
 
     results = []
     if buildlist is not None:
@@ -208,17 +233,31 @@ if __name__ == '__main__':
     shutil.copy(os.path.join(templates_dir, 'test_helpers.h'), build_dir+'/test/')
 
     # start building test apps
-    for msg_name in sorted(builtlist):
-        #ignore message types that are only for includes
-        if message_dict[msg_name].default_dtid is None:
-            continue
-        print(bcolors.HEADER + 'Starting Test for %s' % (msg_name,) + bcolors.ENDC)
-        if message_dict[msg_name].kind == message_dict[msg_name].KIND_SERVICE:
-            if len(message_dict[msg_name].request_fields):
-                compile_test_app(msg_name+'_request', build_dir)
-                run_test(message_dict[msg_name], 'request', build_dir)
-            compile_test_app(msg_name+'_response', build_dir)
-            run_test(message_dict[msg_name], 'response', build_dir)
-        else:
-            compile_test_app(msg_name, build_dir)
-            run_test(message_dict[msg_name], None, build_dir)
+    pool = Pool(processes=jobs)
+    try:
+        one_run = False
+        results = []
+        msg_list = [msg_name for msg_name in sorted(builtlist, reverse=True) if message_dict[msg_name].default_dtid is not None]
+        if len(msg_list) > 0:
+             # need to run one test not in parallel so all the dependent code gets built
+            process_test(msg_list.pop(), jobs)
+        # don't keep too many jobs pending so we can wait for them to finish quickly on error
+        while len(results) > 0 or len(msg_list) > 0:
+            while len(results) < jobs*1.25 and len(msg_list) > 0:
+                results.append(pool.apply_async(process_test, (msg_list.pop(), 1)))
+            time.sleep(0.1)
+            pending = []
+            for result in results:
+                if result.ready():
+                    result.get() # will raise exception if failed
+                else:
+                    pending.append(result)
+            results = pending
+    except KeyboardInterrupt:
+        pool.terminate()
+        raise
+    finally:
+        pool.close()
+        pool.join()
+
+    print("All tests completed successfully")
